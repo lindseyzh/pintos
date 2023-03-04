@@ -38,6 +38,10 @@
 #include "filesys/fsutil.h"
 #endif
 
+char prompt[] = "PKUOS> ";    /* command line prompt */
+char whoami[] = "whoami";
+#define MAXLINE 8196
+
 /** Page directory with kernel mappings only. */
 uint32_t *init_page_dir;
 
@@ -133,7 +137,54 @@ pintos_init (void)
     /* Run actions specified on kernel command line. */
     run_actions (argv);
   } else {
-    // TODO: no command line passed to kernel. Run interactively 
+    // TODO: no command line passed to kernel. Run interactively
+      bool print_prompt=1;
+      char *cmdline = (char*)malloc(MAXLINE);
+
+      while(print_prompt){
+        printf("%s", prompt);
+        int idx=0;
+        memset(cmdline, 0, MAXLINE);
+
+        // get cmdline
+        while(1){
+          char c = input_getc();
+          // newline dealing
+          if(c == '\r'){ // not \n 
+            printf("\n");
+            cmdline[idx++] = '\0';
+            break;
+          }
+          // backspace dealing. Ref:https://blog.csdn.net/u011011827/article/details/125656962?ops_request_misc=%257B%2522request%255Fid%2522%253A%2522167772676616800188575949%2522%252C%2522scm%2522%253A%252220140713.130102334.pc%255Fall.%2522%257D&request_id=167772676616800188575949&biz_id=&utm_medium=distribute.pc_search_result.none-task-code-2~all~first_rank_ecpm_v1~rank_v31_ecpm-1-125656962-0-null-null.142%5Ev73%5Einsert_down1,201%5Ev4%5Eadd_ask,239%5Ev2%5Einsert_chatgpt&utm_term=shell%E4%B8%AD%E5%AE%9E%E7%8E%B0backspace
+          else if(c == 127){
+            if(idx>0){
+              cmdline[idx--]='\0';
+              // printf("\b"); // Errors Occur
+              printf("\b \b");  
+            }
+            continue;
+          }
+          if(idx >= MAXLINE-1) continue; // do nothing
+          if(c >= 32) // printable
+            printf("%c", c);
+          cmdline[idx++] = c;
+        }
+        
+        // parse cmdline
+        if(strcmp(cmdline, "whoami") == 0){
+          printf("2100013018\n");
+        }
+        else if(strcmp(cmdline, "exit") == 0){
+          break;
+        }
+        else{
+          printf("invalid command\n");
+        }
+      }
+
+      // exit
+      printf("Shell Exited\n");
+      free(cmdline);
   }
 
   /* Finish up. */
