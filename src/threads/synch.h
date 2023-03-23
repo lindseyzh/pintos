@@ -1,5 +1,6 @@
 #ifndef THREADS_SYNCH_H
 #define THREADS_SYNCH_H
+#define MAX_DONATE_DEPTH 8
 
 #include <list.h>
 #include <stdbool.h>
@@ -17,11 +18,17 @@ bool sema_try_down (struct semaphore *);
 void sema_up (struct semaphore *);
 void sema_self_test (void);
 
+/* compare two semaphores by their threads' maximal priorities */
+bool sema_compare_priority (const struct list_elem *a, 
+    const struct list_elem *b, void *aux);
+
 /** Lock. */
 struct lock 
   {
     struct thread *holder;      /**< Thread holding lock (for debugging). */
     struct semaphore semaphore; /**< Binary semaphore controlling access. */
+    int max_priority;           /**< Max priority of all threads waiting for it*/
+    struct list_elem elem;
   };
 
 void lock_init (struct lock *);
@@ -29,6 +36,10 @@ void lock_acquire (struct lock *);
 bool lock_try_acquire (struct lock *);
 void lock_release (struct lock *);
 bool lock_held_by_current_thread (const struct lock *);
+
+/* compare max_priority of different locks*/
+bool lock_compare_priority (const struct list_elem *a, 
+    const struct list_elem *b, void *aux);
 
 /** Condition variable. */
 struct condition 

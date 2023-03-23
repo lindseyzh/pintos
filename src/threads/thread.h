@@ -87,11 +87,20 @@ struct thread
     enum thread_status status;          /**< Thread state. */
     char name[16];                      /**< Name (for debugging purposes). */
     uint8_t *stack;                     /**< Saved stack pointer. */
-    int priority;                       /**< Priority. */
+    int priority;                       /**< Priority.(May be modified by Locks) */
     struct list_elem allelem;           /**< List element for all threads list. */
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /**< List element. */
+
+    /* For priority donation */
+    int init_priority;                  /**< Initial priority before modified */
+    struct lock *lock_waiting;         /**< The lock the thread is waiting for */
+    struct list lock_holding_list;     /**< The locks the thread is holding */
+
+    /* for multilevel feedback queue scheduler */
+    int nice;                          /** Niceness of the thread*/
+    int recent_cpu;                    /** Recent CPU usage */
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
@@ -130,6 +139,11 @@ void thread_yield (void);
 typedef void thread_action_func (struct thread *t, void *aux);
 void thread_foreach (thread_action_func *, void *);
 
+/** Compare the priorities of two threads*/
+bool thread_compare_priority (const struct list_elem *a,
+                              const struct list_elem *b,
+                              void *aux UNUSED);
+
 int thread_get_priority (void);
 void thread_set_priority (int);
 
@@ -137,5 +151,18 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
+/* for multilevel feedback queue scheduler */
+/* calculate priority & recent_CPU for every thread with thread_foreach()*/
+void thread_cal_priority(struct thread*, void* UNUSED);  
+void thread_cal_recent_CPU(struct thread*, void* UNUSED); 
+void load_avg_update(void);
+
+/** Note: About "Warning: function declaration isn't a prototype"
+ * Remember to add "void" in every pair of empty brackets
+ * - void foo(); // error
+ * - void foo(void); // OK
+ */
+
 
 #endif /**< threads/thread.h */
