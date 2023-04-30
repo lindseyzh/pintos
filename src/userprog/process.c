@@ -17,6 +17,7 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "userprog/syscall.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
@@ -26,45 +27,148 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp);
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
-process_execute (const char *file_name) 
+process_execute (const char *cmdline) 
 {
-  char *fn_copy;
+  char *cmd1, *cmd2, *tmp, *process_name;
   tid_t tid;
+  struct thread *cur = thread_current();
 
-  /* Make a copy of FILE_NAME.
+  /* Make a copy of cmdline input.
      Otherwise there's a race between the caller and load(). */
-  fn_copy = palloc_get_page (0);
-  if (fn_copy == NULL)
+  cmd1 = palloc_get_page (0);
+  cmd2 = palloc_get_page (0);
+  if (cmd1 == NULL || cmd2 == NULL)
     return TID_ERROR;
-  strlcpy (fn_copy, file_name, PGSIZE);
+  strlcpy (cmd1, cmdline, PGSIZE);
+  strlcpy (cmd2, cmdline, PGSIZE);
 
-  /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
-  if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+  /* Parse the cmdline. 
+     Note: The function "strtok()" results in error because it is not reentrant. */
+  process_name = strtok_r(cmd1, " ", &tmp); 
+
+  /* Create a new thread to execute the process. */
+  tid = thread_create (process_name, PRI_DEFAULT, start_process, cmd2);
+
+  palloc_free_page (cmd1);
+
+  /* Error checking. Free the pages to prevent memory leaking. */
+  if (tid == TID_ERROR){
+    return TID_ERROR;
+  }
+
+  /* Wait for its child. Return -1 if fails. */
+  sema_down(&cur->sema_parent);
+
+  /* Return -1 on failure. */
+  if(!cur->exec_success)
+    return -1;
+  /* Reset the flag on success. */
+  cur->exec_success = 0; 
+
   return tid;
 }
 
 /** A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
+start_process (void *cmdline_)
 {
-  char *file_name = file_name_;
+  char *cmdline = cmdline_, *cur_arg, *save_ptr;
+  char *cmdline_dup = palloc_get_page (0);
+  strlcpy (cmdline_dup, cmdline, PGSIZE);
+
+  int argc = 0; // The number of arguments
+  void *argv[64];  // The value of arguments
+  /* Note: cmdline is less than 128 bytes, so the number of
+     arguments is less than 64 bytes. (A space is needed between 
+     any two arguments)*/
+  
   struct intr_frame if_;
   bool success;
+  struct thread *cur = thread_current();
 
-  /* Initialize interrupt frame and load executable. */
+  /* Initialize interrupt frame and load the executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+
+  char *process_name = strtok_r(cmdline, " ", &save_ptr);
+
+  lock_acquire(&filesys_lock);
+  success = load (process_name, &if_.eip, &if_.esp);
+  lock_release(&filesys_lock); 
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);
-  if (!success) 
+  if (!success) {
+    palloc_free_page(cmdline);
+    palloc_free_page(cmdline_dup);
+
+    /* Information update. */
+    cur->myinfo->exited = 1;
+    cur->exit_code = -1;
+
+    /* Wake up the parent thread after setting the return value. */
+    sema_up(&cur->parent->sema_parent);
+    
     thread_exit ();
+  }
+
+  /* Arguments passing */
+
+  /* %esp set to PHYS_BASE */
+  if_.esp = PHYS_BASE;
+
+  /* Parse the command line input into arguments and
+     put them into the stack in right-to-left order. 
+     Store the address in argv[] for later use. */
+  cur_arg = strtok_r(cmdline_dup, " ", &save_ptr);
+  while(cur_arg != NULL){
+    int arg_len = strlen(cur_arg) + 1;
+    if_.esp -= arg_len;
+    argv[argc++] = if_.esp; // store the addr of args in argv
+    memcpy(if_.esp, cur_arg, arg_len * sizeof(char));
+    cur_arg = strtok_r(NULL, " ", &save_ptr);
+  }
+
+  /* Stack alignment */
+  if_.esp -= ((uintptr_t)if_.esp) % 4;
+
+  /* Push the pointers into the stack*/
+  if_.esp -= sizeof(void *);
+  *(uintptr_t *)if_.esp = (uintptr_t) 0; // a NULL pointer sentinel
+  for(int i = argc - 1; i >= 0; i--){
+    if_.esp -= sizeof(void *);
+    memcpy(if_.esp, &argv[i], sizeof(void *));
+  }
+
+  /* Push argv (current %esp) and argc */
+  if_.esp -= sizeof(void *);
+  *(uintptr_t *)if_.esp = (uintptr_t)if_.esp + sizeof(void*);
+  if_.esp -= sizeof(void *); 
+  *(int *)if_.esp = argc;
+
+  /* Push 0 as a fake return address */
+  if_.esp -= sizeof(void *);
+  *(uintptr_t *)if_.esp = (uintptr_t) 0; 
+
+  /* Check if there is any stack overflow. */
+  if(!thread_check_magic())
+    thread_exit();
+
+  /* Deny writing of the exec file*/
+  lock_acquire(&filesys_lock);
+  struct file *f = filesys_open(process_name);
+  file_deny_write(f);
+  lock_release(&filesys_lock);
+  cur->cur_exec_file = f;
+
+  palloc_free_page(cmdline);
+  palloc_free_page(cmdline_dup);
+
+  /* Load success. Wake up the waiting parent. */
+  cur->parent->exec_success = 1;
+  sema_up(&cur->parent->sema_parent);
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -82,12 +186,34 @@ start_process (void *file_name_)
    child of the calling process, or if process_wait() has already
    been successfully called for the given TID, returns -1
    immediately, without waiting.
-
-   This function will be implemented in problem 2-2.  For now, it
-   does nothing. */
+ */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (tid_t child_tid) 
 {
+  struct thread *cur = thread_current();
+  struct list_elem *e;
+
+  /* Search the child list for the child*/
+  for(e = list_begin(&cur->child_list); e != list_end(&cur->child_list); 
+      e = list_next(e)){
+    struct child_info *c = list_entry(e, struct child_info, elem);
+
+    if(c->tid == child_tid){
+      /* If the child has been waited on, return -1. */
+      if(c->waited)
+        return -1;
+      c->waited = 1;
+
+      /* If the child is alive and never waited on, wait on it. */
+      if(!c->exited){
+          sema_down(&c->sema_child); // waiting for the child
+          return c->exit_code;
+      }
+
+      /* If the child has exited, return the exit code. */
+      return c->exit_code;
+    }
+  }
   return -1;
 }
 
@@ -96,7 +222,13 @@ void
 process_exit (void)
 {
   struct thread *cur = thread_current ();
+  printf ("%s: exit(%d)\n", cur->name, cur->exit_code);
   uint32_t *pd;
+  
+  /* Close the executable of current thread.*/
+  lock_acquire(&filesys_lock);
+  file_close(cur->cur_exec_file);
+  lock_release(&filesys_lock);
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */

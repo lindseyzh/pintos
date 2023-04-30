@@ -146,6 +146,11 @@ malloc (size_t size)
     }
 
   /* Get a block from free list and return it. */
+  // for(struct list_elem *e = list_begin(&d->free_list); e!=list_end(&d->free_list); e=list_next(e)){
+  //   printf("p=%lx ", e);
+  // }
+  // printf("\n");
+  // printf("listsize = %d\n", list_size(&d->free_list));
   b = list_entry (list_pop_front (&d->free_list), struct block, free_elem);
   a = block_to_arena (b);
   a->free_cnt--;

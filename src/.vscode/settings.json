@@ -1,5 +1,11 @@
 {
     "files.associations": {
-        "flags.h": "c"
+        "list.h": "c",
+        "off_t.h": "c",
+        "filesys.h": "c",
+        "interrupt.h": "c",
+        "syscall.h": "c",
+        "file.h": "c",
+        "malloc.h": "c"
     }
 }

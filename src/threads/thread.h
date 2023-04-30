@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
 
 /** States in a thread's life cycle. */
 enum thread_status
@@ -87,29 +88,57 @@ struct thread
     enum thread_status status;          /**< Thread state. */
     char name[16];                      /**< Name (for debugging purposes). */
     uint8_t *stack;                     /**< Saved stack pointer. */
-    int priority;                       /**< Priority.(May be modified by Locks) */
-    struct list_elem allelem;           /**< List element for all threads list. */
+    int priority;                       /**< Priority. */
+    struct list_elem allelem;           /**< List element for all_list. */
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /**< List element. */
-
-    /* For priority donation */
-    int init_priority;                  /**< Initial priority before modified */
-    struct lock *lock_waiting;         /**< The lock the thread is waiting for */
-    struct list lock_holding_list;     /**< The locks the thread is holding */
-
-    /* for multilevel feedback queue scheduler */
-    int nice;                          /** Niceness of the thread*/
-    int recent_cpu;                    /** Recent CPU usage */
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /**< Page directory. */
 #endif
 
-    /* Owned by thread.c. */
-    unsigned magic;                     /**< Detects stack overflow. */
+   /* For Lab 2 */
+   
+    /* For the system call exec() and wait() */
+    struct thread *parent;             /**< Parent of the thread. */
+    struct list child_list;            /**< The list of its child. */
+    struct child_info *myinfo;         /**< Infor of the thread as child. */
+    struct semaphore sema_parent;
+    bool exec_success;
+    int exit_code;                     /**< Initialized as 0. */ 
+
+    /* For file operation*/
+    struct file *cur_exec_file;        /**< Exec file of current process. */
+    struct list file_list;             /**< A list of files the thread opens. */
+    int fd_num;                        /**< The number of created fds. */
+
+   /* Owned by thread.c. */
+    unsigned magic;                    /**< Detects stack overflow. */
+
   };
+
+
+/* For lab 2*/
+
+/* A struct to store child information */
+struct child_info{
+    tid_t tid;
+    int exit_code;
+    bool exited;                       /**< Does the child have exited? */
+    bool waited;                       /**< Is the child waited by parent? */
+    struct thread *child;
+    struct semaphore sema_child;
+    struct list_elem elem;
+}; 
+
+/* A struct to store the infomation of the thread's opened files*/
+struct file_info{
+    int fd;
+    struct file *f;
+    struct list_elem elem;
+};
 
 /** If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
@@ -139,11 +168,6 @@ void thread_yield (void);
 typedef void thread_action_func (struct thread *t, void *aux);
 void thread_foreach (thread_action_func *, void *);
 
-/** Compare the priorities of two threads*/
-bool thread_compare_priority (const struct list_elem *a,
-                              const struct list_elem *b,
-                              void *aux UNUSED);
-
 int thread_get_priority (void);
 void thread_set_priority (int);
 
@@ -152,17 +176,6 @@ void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
-/* for multilevel feedback queue scheduler */
-/* calculate priority & recent_CPU for every thread with thread_foreach()*/
-void thread_cal_priority(struct thread*, void* UNUSED);  
-void thread_cal_recent_CPU(struct thread*, void* UNUSED); 
-void load_avg_update(void);
-
-/** Note: About "Warning: function declaration isn't a prototype"
- * Remember to add "void" in every pair of empty brackets
- * - void foo(); // error
- * - void foo(void); // OK
- */
-
+bool thread_check_magic();
 
 #endif /**< threads/thread.h */
