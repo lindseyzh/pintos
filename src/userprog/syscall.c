@@ -1,4 +1,5 @@
 #include "userprog/syscall.h"
+#include "userprog/process.h"
 #include <stdio.h>
 #include <syscall-nr.h>
 #include "threads/interrupt.h"
@@ -7,14 +8,13 @@
 #include "threads/vaddr.h"
 #include "pagedir.h"
 #include "process.h"
-#include "filesys/filesys.h"
-#include "filesys/file.h"
 #include "devices/input.h"
 #include "threads/malloc.h"
+#include "vm/page.h"
 
 /* Syscall handlers for different syscalls. */
 static void syscall_handler (struct intr_frame *);
-static void syscall_halt(struct intr_frame *);
+static void syscall_halt(struct intr_frame * UNUSED);
 static void syscall_exit(struct intr_frame *);
 static void syscall_exec(struct intr_frame *);
 static void syscall_wait(struct intr_frame *);
@@ -27,23 +27,31 @@ static void syscall_write(struct intr_frame *);
 static void syscall_seek(struct intr_frame *);
 static void syscall_tell(struct intr_frame *);
 static void syscall_close(struct intr_frame *);
+static void syscall_mmap(struct intr_frame *);
+static void syscall_munmap(struct intr_frame *);
+
+static void page_preload_and_pin(void *addr, size_t size);
+static void page_unpin(void *addr, size_t size);
 
 /* Check the validity of a pointer from userprog. 
    The first one is an old version. */
 static void *check_ptr(void *);
 static void *check_ptr_more(void *);
-inline bool check_pg_ptr(void *ptr);
+static inline bool check_pg_ptr(void *ptr);
 
 /* Assistance function of user memeory accessing */
 static int get_user (const uint8_t *uaddr);
-static bool put_user (uint8_t *udst, uint8_t byte);
 
 /* Kill the userprog and return -1 if needed.*/
-static inline void exit_on_error();
+static inline void exit_on_error(void);
+static inline void on_failure(struct intr_frame *f);
+
 
 /* Transfer a file descriptor into a pointer to struct file. 
    Return NULL if the file descriptor does not exit. */
 static struct file_info *fd_to_file_info(int fd);
+
+static unsigned char *esp_for_page_fault;
 
 void
 syscall_init (void) 
@@ -58,7 +66,8 @@ syscall_handler (struct intr_frame *f)
 {
   /* Get the syscall_num. */
   int syscall_num = *(int *)check_ptr_more(f->esp); 
-  // printf("syscall=%d",syscall_num);
+  esp_for_page_fault = f->esp;
+  // printf("syscall=%d\n",syscall_num);
   switch(syscall_num){
     case SYS_HALT:
       syscall_halt(f);
@@ -99,6 +108,12 @@ syscall_handler (struct intr_frame *f)
     case SYS_CLOSE:
       syscall_close(f);
       break;
+    case SYS_MMAP:
+      syscall_mmap(f);
+      break;
+    case SYS_MUNMAP:
+      syscall_munmap(f);
+      break;
     default:
       NOT_REACHED();
       break;
@@ -107,7 +122,7 @@ syscall_handler (struct intr_frame *f)
 
 /* 1. HALT*/
 static void 
-syscall_halt(struct intr_frame *f){
+syscall_halt(struct intr_frame *f UNUSED){
   shutdown_power_off();
 }
 
@@ -190,7 +205,6 @@ syscall_open(struct intr_frame *f){
 static void 
 syscall_filesize(struct intr_frame *f){
   int fd = *(int *)check_ptr_more(f->esp + sizeof(void *));
-  struct thread *cur = thread_current();
 
   struct file_info *fi = fd_to_file_info(fd);
 
@@ -215,7 +229,7 @@ syscall_read(struct intr_frame *f){
   /* fd == STDIN: input_getc() */
   if(fd == STDIN_FILENO){ 
     uint8_t *b = (uint8_t *)buffer;
-    for(int i = 0; i < size; i++)
+    for(unsigned i = 0; i < size; i++)
       b[i] = input_getc();
     f->eax = size;
     return;
@@ -230,7 +244,9 @@ syscall_read(struct intr_frame *f){
   struct file_info *fi = fd_to_file_info(fd);
   if(fi != NULL && fi->f != NULL){
     lock_acquire(&filesys_lock);
+    page_preload_and_pin(buffer, size);
     f->eax = file_read(fi->f, buffer, size);
+    page_unpin(buffer, size);
     lock_release(&filesys_lock);
     return;
   }
@@ -262,7 +278,9 @@ syscall_write(struct intr_frame *f){
   struct file_info *fi = fd_to_file_info(fd);
   if(fi != NULL){
     lock_acquire(&filesys_lock);
+    page_preload_and_pin(buffer, size);
     f->eax = file_write(fi->f, buffer, size);
+    page_unpin(buffer, size);
     lock_release(&filesys_lock);
     return;
   } 
@@ -312,14 +330,125 @@ syscall_close(struct intr_frame *f){
   }
 }
 
-inline bool check_pg_ptr(void *ptr){
+/* 14. mmap */
+static void 
+syscall_mmap(struct intr_frame *f){
+  int fd = *(int *)check_ptr_more(f->esp + sizeof(void *));
+  void *addr = *(void**)check_ptr_more(f->esp + 2 * sizeof(void*));
+  struct thread *cur = thread_current();
+  if(pg_ofs(addr) != 0 || !addr || supp_page_to_spte(cur, addr) !=NULL ||
+     fd == STDIN_FILENO || fd == STDOUT_FILENO){
+    on_failure(f);
+    return;
+  }
+
+  lock_acquire(&filesys_lock);
+
+  struct file_info *fi = fd_to_file_info(fd);
+  if(fi == NULL || fi->f == NULL){
+    on_failure(f);
+    return;
+  }
+
+  struct file *new_f = file_reopen(fi->f);
+  if(new_f == NULL){
+    on_failure(f);
+    return;
+  }
+
+  size_t size = file_length(new_f);
+  if(size == 0) {
+    on_failure(f);
+    return;
+  }
+
+  /* Check if the pages are already mapped */
+  void* ptr;
+  size_t ofs;
+  for(ofs = 0; ofs < size; ofs += PGSIZE){
+    ptr = addr + ofs;
+    if(supp_page_to_spte(cur, ptr) != NULL){
+      on_failure(f);
+      return;
+    }
+  }
+  
+  /* Map the file. */
+  for(ofs = 0; ofs < size; ofs += PGSIZE){
+    ptr = addr + ofs;
+    size_t read_bytes = ofs + PGSIZE < size ? PGSIZE : size - ofs;
+    size_t zero_bytes = PGSIZE - read_bytes;
+    supp_install_page_file(cur, ptr, new_f, ofs, read_bytes, zero_bytes, 1);
+  }
+
+  struct mmap_entry* mmap_e = 
+                  (struct mmap_entry*)malloc(sizeof(struct mmap_entry));
+  f->eax = mmap_e->mmapid = cur->mmap_id++;
+  mmap_e->f = new_f;
+  mmap_e->addr = addr;
+  mmap_e->size = size;
+  list_push_back(&cur->mmap_list, &mmap_e->elem);
+
+  lock_release(&filesys_lock);
+  return;
+}
+
+/* 15. munmap */
+static void syscall_munmap(struct intr_frame *f){
+  mmapid_t mmapid = *(mmapid_t *)check_ptr_more(f->esp + sizeof(void*));
+  f->eax = munmap_without_syscall(mmapid);
+  return;
+}
+
+bool munmap_without_syscall(mmapid_t mmapid){
+  struct thread *cur = thread_current();
+  struct mmap_entry *mmap_e = NULL;
+
+  /* Search the mmap list of the current thread for the mmap_entry */
+  struct list_elem *e;
+  for(e = list_begin(&cur->mmap_list); e != list_end(&cur->mmap_list);
+      e = list_next(e)){
+    struct mmap_entry *mmap_e_tmp = list_entry(e, struct mmap_entry, elem);
+    if(mmap_e_tmp->mmapid == mmapid){
+      mmap_e = mmap_e_tmp;
+      break;
+    }
+  }
+  
+  /* Returns false if the mmap_id does not exist */
+  if(mmap_e == NULL){
+    return false;
+  }
+
+  lock_acquire(&filesys_lock);
+
+  /* Unmap the file and free the resource */
+  size_t size = mmap_e->size;
+  void *addr = mmap_e->addr, *ptr, *new_f = mmap_e->f;
+  size_t ofs;
+  for(ofs = 0; ofs < size; ofs += PGSIZE){
+    ptr = addr + ofs;
+    size_t bytes = ofs + PGSIZE < size ? PGSIZE : size - ofs;
+    supp_uninstall_page(cur, ptr, new_f, ofs, bytes);
+  }
+
+  file_close(mmap_e->f);
+  list_remove(&mmap_e->elem);
+  free(mmap_e);
+
+  lock_release(&filesys_lock);
+  
+  return true;
+}
+
+static inline bool check_pg_ptr(void *ptr){
   return ptr && is_user_vaddr(ptr) && 
       pagedir_get_page(thread_current()->pagedir, ptr) != NULL;
 }
 
 /* Terminate the process when a fatal error occurs. */
 static inline void 
-exit_on_error(){
+exit_on_error(void){
   if(lock_held_by_current_thread(&filesys_lock)){
     lock_release(&filesys_lock);
   }
@@ -355,17 +484,19 @@ check_ptr_more(void *ptr){
   /* Is the address legal? */
   if(ptr == NULL || !is_user_vaddr(ptr))
     exit_on_error();
-
-  /* Is the address in the current thread page? */
-  void *pgptr = pagedir_get_page(thread_current()->pagedir, ptr);
-  if(pgptr == NULL)
-    exit_on_error();
   
   /* Check more addresses. */
   uint8_t *ptrr = (uint8_t *)ptr;
   for(uint8_t i = 0; i < 4; i++){
     if(get_user(ptrr + i) == -1)
       exit_on_error();
+  }
+
+  /* Is the address in the current thread page? */
+  void *pgptr = pagedir_get_page(thread_current()->pagedir, ptr);
+
+  if(pgptr == NULL){
+    exit_on_error();
   }
 
   /* Everything checked. A safe pointer. */
@@ -387,18 +518,6 @@ get_user (const uint8_t *uaddr)
   return result;
 }
 
-/* Writes BYTE to user address UDST.
-   UDST must be below PHYS_BASE.
-   Returns true if successful, false if a segfault occurred. */
-static bool
-put_user (uint8_t *udst, uint8_t byte)
-{
-  int error_code;
-  asm ("movl $1f, %0; movb %b2, %1; 1:"
-       : "=&a" (error_code), "=m" (*udst) : "q" (byte));
-  return error_code != -1;
-}
-
 /* Transfer a file descriptor into a pointer to file_info. */
 static struct file_info *
 fd_to_file_info(int fd){
@@ -412,3 +531,40 @@ fd_to_file_info(int fd){
   }
   return NULL;
 }
+
+/* Preload a page and pin it temporarily. 
+   The page will be unpinned soon. */
+static void 
+page_preload_and_pin(void *addr, size_t size){
+  struct thread *cur = thread_current();
+  void *upage;
+  for(upage = pg_round_down(addr); upage < addr + size; upage += PGSIZE){
+    supp_load_page(cur, upage);
+    supp_page_set_pinned(cur, upage, 1);
+  }
+}
+
+/* Unpin the page. */
+static void
+page_unpin(void *addr, size_t size){
+  struct thread *cur = thread_current();
+  void *upage;
+  for(upage = pg_round_down(addr); upage < addr + size; upage += PGSIZE){
+    supp_page_set_pinned(cur, upage, 0);
+  }
+}
+
+/* Store the stack pointer for page fault handler. */
+unsigned char* get_esp_for_page_fault(void){
+  return esp_for_page_fault;
+}
+
+/* Helper function in mmap: 
+   set the return value as -1, release the lock and return. */
+static inline void on_failure(struct intr_frame *f){
+  if(lock_held_by_current_thread(&filesys_lock)){
+    lock_release(&filesys_lock);
+  }
+  f->eax = -1;
+}
+

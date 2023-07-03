@@ -541,6 +541,10 @@ init_thread (struct thread *t, const char *name, int priority)
   /* Note: The documentation says there are only STDIN & STDOUT initally, 
      but I reserve STDERR for safety (anyway there are enough fds)*/
 
+  /* For lab 3 */
+  list_init(&t->mmap_list);
+  t->mmap_id = 1;
+
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
   intr_set_level (old_level);

@@ -3,6 +3,7 @@
 
 #include <debug.h>
 #include <list.h>
+#include <hash.h>
 #include <stdint.h>
 #include "threads/synch.h"
 
@@ -114,6 +115,11 @@ struct thread
     struct list file_list;             /**< A list of files the thread opens. */
     int fd_num;                        /**< The number of created fds. */
 
+    /* For Lab 3 */
+    struct hash supp_page_table;       /**< Supplementary page table. */
+    struct list mmap_list;             /**< A list of struct mmap_entry. */
+    size_t mmap_id;                    /**< The next mmap_id. */
+
    /* Owned by thread.c. */
     unsigned magic;                    /**< Detects stack overflow. */
 
@@ -176,6 +182,6 @@ void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
-bool thread_check_magic();
+bool thread_check_magic(void);
 
 #endif /**< threads/thread.h */

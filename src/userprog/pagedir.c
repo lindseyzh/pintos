@@ -145,7 +145,9 @@ pagedir_clear_page (uint32_t *pd, void *upage)
 {
   uint32_t *pte;
 
-  ASSERT (pg_ofs (upage) == 0);
+  if(pg_ofs(upage)!=0)
+    PANIC("Error: pg_ofs(upage) = %d", pg_ofs(upage));
+  // ASSERT (pg_ofs (upage) == 0);
   ASSERT (is_user_vaddr (upage));
 
   pte = lookup_page (pd, upage, false);

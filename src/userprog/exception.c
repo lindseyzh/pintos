@@ -4,6 +4,11 @@
 #include "userprog/gdt.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "vm/page.h"
+#include "userprog/syscall.h"
+#include "threads/vaddr.h"
+
+#define MAX_STACK_SIZE 1 << 23 // 8MB
 
 /** Number of page faults processed. */
 static long long page_fault_cnt;
@@ -109,6 +114,30 @@ kill (struct intr_frame *f)
     }
 }
 
+/* Check if the page fault happens in system call.
+   If yes, set the return value as -1 (%eax) and return; 
+   if not, just kill the thread. */
+static void check_and_kill(struct intr_frame *f, bool not_present, 
+      bool write, bool user, void *fault_addr){
+   /* If a page_fault happens in kernel because of a syscall,
+      just kill the user process but don't kill the kernel. */
+  if (!user) {
+    f->eip = (void (*) (void)) f->eax;
+    f->eax = -1;    
+    return;
+  }
+
+  /* To implement virtual memory, delete the rest of the function
+     body, and replace it with code that brings in the page to
+     which fault_addr refers. */
+  printf ("Page fault at %p: %s error %s page in %s context.\n",
+          fault_addr,
+          not_present ? "not present" : "rights violation",
+          write ? "writing" : "reading",
+          user ? "user" : "kernel");
+  kill (f);
+}
+
 /** Page fault handler.  This is a skeleton that must be filled in
    to implement virtual memory.  Some solutions to project 2 may
    also require modifying this code.
@@ -149,22 +178,43 @@ page_fault (struct intr_frame *f)
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
 
-   /* If a page_fault happens in kernel because of a syscall,
-      just kill the user process but don't kill the kernel. */
-  if (!user) {
-    f->eip = (void (*) (void)) f->eax;
-    f->eax = -1;
-    return;
-  }
+   /* For Lab 3 */
 
-  /* To implement virtual memory, delete the rest of the function
-     body, and replace it with code that brings in the page to
-     which fault_addr refers. */
-  printf ("Page fault at %p: %s error %s page in %s context.\n",
-          fault_addr,
-          not_present ? "not present" : "rights violation",
-          write ? "writing" : "reading",
-          user ? "user" : "kernel");
-  kill (f);
+   void* fault_page = pg_round_down(fault_addr);
+   struct thread *cur = thread_current();
+ 
+   /* If the pte is not not_present */
+   if(!not_present){
+      check_and_kill(f, not_present, write, user, fault_addr);
+      return;
+   }
+
+   /* Stack growth */   
+
+   /* Get the correct stack pointer */
+   void *esp;
+   if(user) 
+      esp = f->esp;
+   else 
+      esp = get_esp_for_page_fault();
+
+   bool stack_fault = fault_addr >= esp || fault_addr == esp - 4 || 
+                         fault_addr == esp - 32;
+   bool stack_to_grow = 
+            (uint64_t)fault_addr >= ((uint64_t)PHYS_BASE - MAX_STACK_SIZE);
+
+   /* If OK, make the stack grow with a new zero page */                
+   if (stack_fault && stack_to_grow && fault_addr < PHYS_BASE) {
+      if (!supp_page_to_spte(cur, fault_page)){
+         supp_install_page_zero (cur, fault_page);
+      }
+   }
+
+   /* Load the fault page. */
+
+   if(supp_load_page(cur, fault_page)){
+      return;
+   }
+
+   check_and_kill(f, not_present, write, user, fault_addr);
 }
-

@@ -18,9 +18,19 @@ test_main (void)
   CHECK ((map = mmap (handle, actual)) != MAP_FAILED, "mmap \"sample.txt\"");
 
   /* Check that data is correct. */
-  if (memcmp (actual, sample, strlen (sample)))
+  if (memcmp (actual, sample, strlen (sample))){
+    // size_t a = strlen(sample);
+    // size_t b = strlen(actual);
+    // size_t len = a < b ? a : b;
+    // printf("Length: %d, should be %d\n", a, b);
+    // for(size_t i = 0; i < len; i++){
+    //   if(sample[i] != actual[i]){
+    //     printf("Error in char %d: '%c', should be '%c'\n", 
+    //           i, sample[i], actual[i]);
+    //   }
+    // }
     fail ("read of mmap'd file reported bad data");
-
+  }
   /* Verify that data is followed by zeros. */
   for (i = strlen (sample); i < 4096; i++)
     if (actual[i] != 0)
